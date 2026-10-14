@@ -306,14 +306,14 @@ export const ControlBar: React.FC<ControlBarProps> = ({
               <button
                 onClick={() => changeSpeed(5)}
                 className="hover:text-blue-400 transition-colors"
-                title="속도 증가 (위 화살표)"
+                title="속도 증가 (아래 화살표 ↓)"
               >
                 <ChevronUp className="w-3.5 h-3.5" />
               </button>
               <button
                 onClick={() => changeSpeed(-5)}
                 className="hover:text-blue-400 transition-colors"
-                title="속도 감소 (아래 화살표)"
+                title="속도 감소 (위 화살표 ↑)"
               >
                 <ChevronDown className="w-3.5 h-3.5" />
               </button>

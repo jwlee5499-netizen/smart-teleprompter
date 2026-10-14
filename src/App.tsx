@@ -331,11 +331,13 @@ export function App() {
           break;
         case 'ArrowUp':
           e.preventDefault();
-          setSettings((prev) => ({ ...prev, scrollSpeed: Math.min(100, prev.scrollSpeed + 5) }));
+          // 위 화살표: 스크롤 속도 느려짐
+          setSettings((prev) => ({ ...prev, scrollSpeed: Math.max(5, prev.scrollSpeed - 5) }));
           break;
         case 'ArrowDown':
           e.preventDefault();
-          setSettings((prev) => ({ ...prev, scrollSpeed: Math.max(5, prev.scrollSpeed - 5) }));
+          // 아래 화살표: 스크롤 속도 빨라짐
+          setSettings((prev) => ({ ...prev, scrollSpeed: Math.min(100, prev.scrollSpeed + 5) }));
           break;
         case 'ArrowLeft':
         case 'Backspace':
