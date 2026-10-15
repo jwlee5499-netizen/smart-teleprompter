@@ -129,7 +129,26 @@ export function cleanWord(str: string): string {
 }
 
 /**
- * 한국어 유사도 매칭 (조사/어미 차이 대응하되 오매칭으로 앞서가는 현상 방지)
+ * 숫자 및 한글 수사 상호 매칭 사전
+ */
+const NUMBER_TO_KOREAN: Record<string, string[]> = {
+  '1': ['일', '첫', '하나', '첫번째', '일번'],
+  '2': ['이', '둘', '두', '두번째', '이번'],
+  '3': ['삼', '셋', '세', '세번째', '삼번'],
+  '4': ['사', '넷', '네', '네번째', '사번'],
+  '5': ['오', '다섯', '다섯번째', '오번'],
+  '6': ['육', '여섯', '여섯번째', '육번'],
+  '7': ['칠', '일곱', '일곱번째', '칠번'],
+  '8': ['팔', '여덟', '여덟번째', '팔번'],
+  '9': ['구', '아홉', '아홉번째', '구번'],
+  '10': ['십', '열', '열번째', '십번'],
+};
+
+/**
+ * 한국어 유사도 매칭:
+ * - 조사/어미 차이 대응 (예: "발표를" vs "발표는", "돈을" vs "돈이", "집에" vs "집으로")
+ * - 동사/형용사 활용형 대응 (예: "시작하겠습니다" vs "시작합니다", "알아보겠습니다" vs "알아봅니다")
+ * - 숫자 및 한글 수사 대응 (예: "1" vs "일"/"첫", "2" vs "이"/"둘"/"두")
  */
 export function isKoreanWordSimilar(scriptWord: string, spokenWord: string): boolean {
   if (!scriptWord || !spokenWord) return false;
@@ -138,16 +157,39 @@ export function isKoreanWordSimilar(scriptWord: string, spokenWord: string): boo
   const minLen = Math.min(scriptWord.length, spokenWord.length);
   const maxLen = Math.max(scriptWord.length, spokenWord.length);
 
-  // 1. 접두사 일치 (어근이 같고 조사/어미만 1~2글자 차이 나는 경우)
+  // 1. 숫자 <-> 한글 수사 상호 매칭 대응
+  if (NUMBER_TO_KOREAN[scriptWord]?.includes(spokenWord) || NUMBER_TO_KOREAN[spokenWord]?.includes(scriptWord)) {
+    return true;
+  }
+  const digitMatch = scriptWord.match(/^(\d+)(.*)$/);
+  if (digitMatch && NUMBER_TO_KOREAN[digitMatch[1]]) {
+    const numWords = NUMBER_TO_KOREAN[digitMatch[1]];
+    if (numWords.some((nw) => spokenWord.startsWith(nw))) {
+      return true;
+    }
+  }
+
+  // 2. 접두사 일치 (어근이 같고 조사/어미만 1~2글자 차이 나는 경우)
   if (scriptWord.startsWith(spokenWord) || spokenWord.startsWith(scriptWord)) {
     if (minLen >= 2 && maxLen - minLen <= 2) {
       return true;
     }
   }
 
-  // 2. 3글자 이상 단어에서 앞 2글자 이상이 일치하고 길이 차이가 1 이하인 경우
-  if (minLen >= 3 && maxLen - minLen <= 1) {
-    if (scriptWord.slice(0, 2) === spokenWord.slice(0, 2)) {
+  // 3. 2글자 이상 어근 일치 및 활용형 대응
+  if (minLen >= 2) {
+    // 2글자 단어에서 첫 글자가 같은 조사 차이 (예: "돈을" vs "돈이", "집에" vs "집을")
+    if (minLen === 2 && maxLen === 2 && scriptWord[0] === spokenWord[0]) {
+      return true;
+    }
+
+    // 2~3글자 이상 어근이 같고 길이 차이가 2 이하인 경우 ("발표를" vs "발표는", "시작하겠습니다" vs "시작합니다")
+    if (scriptWord.slice(0, 2) === spokenWord.slice(0, 2) && maxLen - minLen <= 2) {
+      return true;
+    }
+
+    // 4글자 이상 긴 단어에서 앞 3글자 어근이 같은 경우 (어미 변형 허용)
+    if (minLen >= 4 && scriptWord.slice(0, 3) === spokenWord.slice(0, 3) && maxLen - minLen <= 3) {
       return true;
     }
   }
@@ -548,15 +590,13 @@ export function findMatchingTokenIndex(
     }
   }
 
-  // 1-C) Zone 1 내 단일 단어 일치 (현재 위치에서 최대 4개 발화 어절 이내)
-  const latestSpoken = spokenWords.slice(-3);
+  // 1-C) Zone 1 내 단일 단어 일치 (현재 문장 범위 내 어디서든 신속 매칭)
+  const latestSpoken = spokenWords.slice(-4);
   for (let s = latestSpoken.length - 1; s >= 0; s--) {
     const spWord = latestSpoken[s];
     if (spWord.length < 2) continue;
 
-    let nonParenCount = 0;
-    for (let i = startIdx; i <= zone1End && nonParenCount <= 4; i++) {
-      if (!tokens[i].isParenthetical) nonParenCount++;
+    for (let i = startIdx; i <= zone1End; i++) {
       if (isTokenMatch(tokens[i], spWord)) {
         return i;
       }

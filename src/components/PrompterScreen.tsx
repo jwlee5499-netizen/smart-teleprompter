@@ -179,18 +179,13 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
         Math.max(lineHeightPx * 0.75, nextRowY - currentRowY)
       );
 
-      // 줄의 첫 단어부터 마지막 단어까지 끊김 없이 연속 비례 진행 (0% ~ 85%)
-      const progressFraction = Math.min(1, (wordOrderInRow + 0.5) / tokensInRow);
-      const confirmedY = currentRowY + progressFraction * rowDelta * 0.85;
+      // 현재 읽고 있는 줄이 항상 가이드라인 포커스 밴드 중앙에 안정적으로 머물도록 안착
+      // 줄 내부의 어절 진행률(0% ~ 16%)은 시선이 가이드라인 밖으로 튀지 않도록 아주 완만하게 유지
+      const progressFraction = Math.min(1, wordOrderInRow / Math.max(1, tokensInRow - 1));
+      const confirmedY = currentRowY + progressFraction * (rowDelta * 0.16);
 
-      // 음성인식이 어절 단위로 0.4~0.9초 간격으로 들어오는 동안에도
-      // 스크롤이 중간에 벽에 부딪혀 멈칫거리지 않도록 현재 어절 앞쪽으로 넉넉한 활주로(runway)를 확보하되,
-      // 아직 읽지 않은 다음 줄(nextRowY)이 가이드라인 위로 넘어가는 것은 엄격히 차단합니다.
-      const lookaheadFraction = Math.min(0.95, (wordOrderInRow + 2.6) / tokensInRow);
-      const safeCeilingY = Math.max(
-        confirmedY + lineHeightPx * 0.35,
-        currentRowY + lookaheadFraction * rowDelta
-      );
+      // 음성 인식이 단어 단위로 들어올 때 다음 줄(nextRowY)이 가이드라인 위로 튀어 올라가지 않도록 안전 상한선 설정
+      const safeCeilingY = currentRowY + Math.min(rowDelta * 0.40, ((wordOrderInRow + 1.2) / tokensInRow) * rowDelta * 0.45);
 
       return { confirmedY, safeCeilingY };
     },
@@ -281,10 +276,10 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       // 화자의 실제 읽는 속도(px/sec)를 아주 무거운 지수이동평균(EMA, 82:18)으로 부드럽게 추정하여
       // 특정 단어가 늦게 인식되더라도 속도가 출렁이지 않게 유지합니다.
       if (dtSec >= 0.15 && dtSec <= 4.0 && deltaY > 1) {
-        const minNaturalSpeed = lineHeightPx * 0.22;
-        const maxNaturalSpeed = lineHeightPx * 0.95;
+        const minNaturalSpeed = lineHeightPx * 0.20;
+        const maxNaturalSpeed = lineHeightPx * 0.72; // 차분하고 부드러운 상한선
         const instantSpeed = Math.min(maxNaturalSpeed, Math.max(minNaturalSpeed, deltaY / dtSec));
-        predictedSpeedRef.current = predictedSpeedRef.current * 0.82 + instantSpeed * 0.18;
+        predictedSpeedRef.current = predictedSpeedRef.current * 0.85 + instantSpeed * 0.15;
       }
 
       confirmedTargetYRef.current = bounds.confirmedY;
@@ -369,12 +364,10 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 timeSinceVoice < 2400 || audioVolumeRef.current > 4;
 
               // 1단계: 가상 가이드 목표점(predictedTargetY)을 매 프레임 부드럽게 전진
-              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때도 즉시 점프하지 않고 초당 2.4~4.5배율로 매끄럽게 흡수
+              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때도 과속이나 덜컹거림 없이 부드럽게(초당 2.0배율) 흡수
               if (predictedTargetYRef.current < confirmedTargetYRef.current) {
                 const catchUpDiff = confirmedTargetYRef.current - predictedTargetYRef.current;
-                // 화자가 가이드라인 아래 문장을 읽어 앞서 나간 경우 더 기민하게 목표 위치 추종
-                const catchUpRate = catchUpDiff > lineHeightPx * 0.7 ? 4.5 : 2.4;
-                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * catchUpRate);
+                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * 2.0);
               }
 
               // - 화자가 말을 이어가는 동안 화자 예상 속도(predictedSpeedRef)로 끊김 없이 연속 전진
@@ -401,26 +394,24 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 // 상한선까지 남은 거리에 따른 부드러운 감속 곡선 (Soft S-Curve Cushion)
                 const softCushion = Math.min(1, headroomToCeiling / (lineHeightPx * 0.5));
 
-                // 기본 순항 속도(화자 예측 속도)가 중심을 잡고, 거리 차이(gapToPredicted)는 완만한 보정만 수행 (0.75배)
+                // 기본 순항 속도(화자 예측 속도)가 중심을 잡고, 거리 차이(gapToPredicted)는 완만한 보정만 수행 (0.50배)
                 const cruiseSpeed = isSpeakerActivelyReading
-                  ? predictedSpeedRef.current * 0.88 * softCushion
+                  ? Math.min(lineHeightPx * 0.78, predictedSpeedRef.current * 0.80) * softCushion
                   : 0;
-                const gentleCorrectionSpeed = gapToPredicted * 0.85;
+                const gentleCorrectionSpeed = gapToPredicted * 0.50;
 
-                // 화자가 가이드라인 아래 문장을 읽어 격차가 벌어진 경우 신속히 정렬될 수 있도록 최대 속도 한도 확장
-                const maxAllowedVelocity = gapToPredicted > lineHeightPx * 0.7
-                  ? Math.min(lineHeightPx * 3.2, gapToPredicted * 2.2)
-                  : lineHeightPx * 1.35;
+                // 속도가 너무 빠르게 치솟지 않도록 최고 속도를 lineHeightPx * 1.22로 엄격하고 차분하게 제한
+                const maxSafeVelocity = lineHeightPx * 1.22;
 
                 desiredVelocity = Math.min(
                   cruiseSpeed + gentleCorrectionSpeed,
-                  headroomToCeiling * 2.2,
-                  maxAllowedVelocity
+                  headroomToCeiling * 1.5,
+                  maxSafeVelocity
                 );
               }
 
-              // 3단계: 무거운 유체 관성 필터(Heavy Fluid Inertia, dt * 2.2)로 미세한 속도 변화까지 완전히 다림질
-              const inertiaBlend = Math.min(1, dt * 2.2);
+              // 3단계: 무거운 유체 관성 필터(Heavy Fluid Inertia, dt * 2.6)로 미세한 속도 변화까지 완전히 다림질
+              const inertiaBlend = Math.min(1, dt * 2.6);
               velocityRef.current = Math.max(
                 0,
                 velocityRef.current + (desiredVelocity - velocityRef.current) * inertiaBlend
