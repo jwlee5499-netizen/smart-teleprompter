@@ -419,9 +419,19 @@ function getNextNonParentheticalIndex(tokens: WordToken[], fromIndex: number): n
 }
 
 /**
- * 음성 인식된 텍스트와 대본 토큰을 엄격하고 유연한 순차 전방(Sequential Forward-only) 방식으로 매칭합니다.
- * 1. 괄호 지문((지문), [연출], 영어 병기 등)은 화자가 스킵해도 멈춤 없이 다음 본문으로 즉시 매칭
- * 2. 화자가 가이드라인 아래 문장을 미리 읽는 경우(최대 40~60개 토큰 / 3~5줄 아래)도 다중 어절 매칭으로 정확히 감지
+ * 음성 인식된 텍스트와 대본 토큰을 스마트하게 매칭합니다.
+ *
+ * [핵심 원칙: 지역성 최우선 (Proximity Priority) 및 계층형 가드레일]
+ * 1. 현재 읽고 있는 문장(Zone 1) 우선 매칭:
+ *    - 현재 문장 내에 발화된 단어가 존재하면 절대 다음 문장이나 다른 단락으로 건너뛰지 않습니다.
+ *    - 같은 단어(예: "우리가", "오늘")가 다음 단락에 반복되어 있더라도 현재 문장에서 먼저 소비되므로 단락 점프 오작동이 100% 원천 차단됩니다.
+ * 2. 가이드라인 바로 아래 문장(Zone 2) 선행 읽기 대응:
+ *    - 현재 문장에 매칭되지 않고, 화자가 바로 아래 문장을 2어절 이상 연속으로 읽을 때만 다음 문장으로 자연스럽게 전진합니다.
+ *    - 단일 단어로는 다음 문장으로 점프할 수 없습니다.
+ * 3. 2문장 이상 원거리/다음 단락(Zone 3) 점프 제한:
+ *    - 2문장 이상 먼 곳이나 다음 단락으로 넘어가려면 반드시 최신 발화 기준 3어절 이상 연속 일치해야만 허용됩니다.
+ * 4. 괄호 지문 스킵:
+ *    - (자료화면 제시), (웃음) 등은 거리 0의 스킵 가능한 지문으로 처리되어 강사가 읽지 않아도 다음 본문이 즉시 매칭됩니다.
  */
 export function findMatchingTokenIndex(
   spokenPhrase: string,
@@ -437,33 +447,67 @@ export function findMatchingTokenIndex(
 
   if (spokenWords.length === 0) return null;
 
-  // 시작 위치: 현재 토큰이 괄호 안의 지문인 경우 다음 발화 토큰으로 자동 이동
-  let start = Math.max(0, currentIndex);
-  if (tokens[start]?.isParenthetical) {
-    start = getNextNonParentheticalIndex(tokens, start);
+  // 1. 현재 유효 시작 위치 계산 (괄호 안 지문 토큰이면 다음 발화 토큰으로 이동)
+  const clampedCurrent = Math.max(0, Math.min(tokens.length - 1, currentIndex));
+  const startIdx = tokens[clampedCurrent]?.isParenthetical
+    ? getNextNonParentheticalIndex(tokens, clampedCurrent)
+    : clampedCurrent;
+
+  if (startIdx >= tokens.length) return null;
+
+  // 2. 현재 문장 및 다음 문장의 인덱스 경계 계산
+  const currentSentenceIdx = tokens[startIdx].sentenceIndex;
+  let currentSentenceEnd = startIdx;
+  while (
+    currentSentenceEnd + 1 < tokens.length &&
+    tokens[currentSentenceEnd + 1].sentenceIndex === currentSentenceIdx
+  ) {
+    currentSentenceEnd++;
   }
 
-  // --- 1단계: 3어절 연속 일치 검색 (최대 +60토큰 앞까지, 가이드라인 아래 3~5문장 탐색) ---
-  const lookaheadEnd3 = Math.min(tokens.length - 1, currentIndex + 60);
+  // 문장 간 전환(현재 문장 끝 어절 -> 다음 문장 첫 1~2어절)도 자연스럽게 포함
+  const zone1End = Math.min(tokens.length - 1, currentSentenceEnd + 2);
+
+  // 다음 문장(Zone 2)의 경계 계산
+  let nextSentenceStart = -1;
+  let nextSentenceEnd = -1;
+  for (let i = currentSentenceEnd + 1; i < tokens.length; i++) {
+    if (tokens[i].sentenceIndex > currentSentenceIdx) {
+      if (nextSentenceStart === -1) {
+        nextSentenceStart = i;
+      }
+      if (tokens[i].sentenceIndex === tokens[nextSentenceStart].sentenceIndex) {
+        nextSentenceEnd = i;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // =========================================================================
+  // [1단계: Zone 1 - 현재 읽고 있는 문장 지역성 우선 매칭]
+  // =========================================================================
+
+  // 1-A) Zone 1 내 3어절 연속 일치
   if (spokenWords.length >= 3) {
-    for (let s = spokenWords.length - 3; s >= Math.max(0, spokenWords.length - 6); s--) {
+    for (let s = spokenWords.length - 3; s >= 0; s--) {
       const w1 = spokenWords[s];
       const w2 = spokenWords[s + 1];
       const w3 = spokenWords[s + 2];
       if (w1.length < 2 && w2.length < 2) continue;
 
-      for (let i = start; i <= lookaheadEnd3 - 2; i++) {
+      for (let i = startIdx; i <= zone1End - 2; i++) {
         if (isTokenMatch(tokens[i], w1)) {
           let j = getNextNonParentheticalIndex(tokens, i + 1);
           if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
             j = i + 1;
           }
-          if (j < tokens.length && isTokenMatch(tokens[j], w2)) {
+          if (j <= zone1End && isTokenMatch(tokens[j], w2)) {
             let k = getNextNonParentheticalIndex(tokens, j + 1);
             if (j + 1 < tokens.length && tokens[j + 1].isParenthetical && isTokenMatch(tokens[j + 1], w3)) {
               k = j + 1;
             }
-            if (k < tokens.length && isTokenMatch(tokens[k], w3)) {
+            if (k <= zone1End && isTokenMatch(tokens[k], w3)) {
               return k;
             }
           }
@@ -472,31 +516,30 @@ export function findMatchingTokenIndex(
     }
   }
 
-  // --- 2단계: 2어절 연속 일치 검색 (최대 +45토큰 앞까지, 가이드라인 아래 2~4문장 탐색) ---
-  const lookaheadEnd2 = Math.min(tokens.length - 1, currentIndex + 45);
+  // 1-B) Zone 1 내 2어절 연속 일치 (한국어 띄어쓰기 결합 포함)
   if (spokenWords.length >= 2) {
-    for (let s = spokenWords.length - 2; s >= Math.max(0, spokenWords.length - 5); s--) {
+    for (let s = spokenWords.length - 2; s >= 0; s--) {
       const w1 = spokenWords[s];
       const w2 = spokenWords[s + 1];
       if (w1.length < 2 && w2.length < 2) continue;
 
-      for (let i = start; i <= lookaheadEnd2 - 1; i++) {
+      for (let i = startIdx; i <= zone1End - 1; i++) {
         let j = getNextNonParentheticalIndex(tokens, i + 1);
         if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
           j = i + 1;
         }
 
-        // Case A: tokens[i] matches w1, tokens[j] matches w2
-        if (isTokenMatch(tokens[i], w1) && j < tokens.length && isTokenMatch(tokens[j], w2)) {
+        // 2어절 연속 일치
+        if (isTokenMatch(tokens[i], w1) && j <= zone1End && isTokenMatch(tokens[j], w2)) {
           return j;
         }
 
-        // Case B: 한국어 띄어쓰기 차이 (예: 대본은 '첫' '번째', 음성은 '첫번째' + '항목을')
-        if (j < tokens.length) {
+        // 한국어 띄어쓰기 결합 (대본 '첫' '번째', 음성 '첫번째' + '항목을')
+        if (j <= zone1End) {
           const combinedW1 = tokens[i].cleanWord + tokens[j].cleanWord;
           if (combinedW1 === w1 || isKoreanWordSimilar(combinedW1, w1)) {
             let k = getNextNonParentheticalIndex(tokens, j + 1);
-            if (k < tokens.length && isTokenMatch(tokens[k], w2)) {
+            if (k <= zone1End && isTokenMatch(tokens[k], w2)) {
               return k;
             }
           }
@@ -505,15 +548,29 @@ export function findMatchingTokenIndex(
     }
   }
 
-  // --- 3단계: 한국어 띄어쓰기 결합/분리 복합어 검색 (최대 +30토큰 앞까지) ---
-  const lookaheadEndCompound = Math.min(tokens.length - 1, currentIndex + 30);
+  // 1-C) Zone 1 내 단일 단어 일치 (현재 위치에서 최대 4개 발화 어절 이내)
+  const latestSpoken = spokenWords.slice(-3);
+  for (let s = latestSpoken.length - 1; s >= 0; s--) {
+    const spWord = latestSpoken[s];
+    if (spWord.length < 2) continue;
+
+    let nonParenCount = 0;
+    for (let i = startIdx; i <= zone1End && nonParenCount <= 4; i++) {
+      if (!tokens[i].isParenthetical) nonParenCount++;
+      if (isTokenMatch(tokens[i], spWord)) {
+        return i;
+      }
+    }
+  }
+
+  // 1-D) Zone 1 내 띄어쓰기 단일 단어 결합 (예: 대본 '인공지능' -> 음성 '인공' '지능')
   for (let s = spokenWords.length - 1; s >= Math.max(0, spokenWords.length - 3); s--) {
     const spWord = spokenWords[s];
     if (spWord.length < 3) continue;
 
-    for (let i = start; i <= lookaheadEndCompound; i++) {
+    for (let i = startIdx; i <= zone1End - 1; i++) {
       let j = getNextNonParentheticalIndex(tokens, i + 1);
-      if (j < tokens.length) {
+      if (j <= zone1End) {
         const combined = tokens[i].cleanWord + tokens[j].cleanWord;
         if (combined === spWord || isKoreanWordSimilar(combined, spWord)) {
           return j;
@@ -522,27 +579,115 @@ export function findMatchingTokenIndex(
     }
   }
 
-  // --- 4단계: 단일 단어 일치 검색 ---
-  const latestSpoken = spokenWords.slice(-2);
-  for (let s = latestSpoken.length - 1; s >= 0; s--) {
-    const spWord = latestSpoken[s];
-    if (spWord.length < 2) continue;
+  // =========================================================================
+  // ★ 중요: Zone 1(현재 문장)에서 일치하는 단어가 발견되었다면 여기서 이미 반환됨!
+  // 아래 단계는 화자가 현재 문장을 읽지 않고 "가이드라인 아래 문장"이나 "다음 단락"을
+  // 선행 발화했을 때만 실행됩니다.
+  // =========================================================================
 
-    // 1) 직전/직후 어절 탐색 (괄호 지문 건너뛰며 다음 4개 발화 단어 탐색)
-    let nonParenCount = 0;
-    for (let i = start; i < tokens.length && nonParenCount <= 4 && i <= currentIndex + 10; i++) {
-      if (!tokens[i].isParenthetical) nonParenCount++;
-      if (isTokenMatch(tokens[i], spWord)) {
-        return i;
+  // 이전 문장의 오래된 발화 단어로 미래 단락이 매칭되는 것을 차단하기 위해,
+  // 원거리 선행 탐색은 오직 '가장 최근에 발화된 4개 단어'만을 후보로 사용합니다.
+  const activeRecentSpoken = spokenWords.slice(-4);
+
+  // =========================================================================
+  // [2단계: Zone 2 - 가이드라인 바로 아래 문장(Next Sentence) 선행 읽기 대응]
+  // =========================================================================
+  if (nextSentenceStart !== -1 && nextSentenceEnd >= nextSentenceStart) {
+    // 2-A) 바로 아래 문장에서 3어절 연속 일치
+    if (activeRecentSpoken.length >= 3) {
+      for (let s = activeRecentSpoken.length - 3; s >= 0; s--) {
+        const w1 = activeRecentSpoken[s];
+        const w2 = activeRecentSpoken[s + 1];
+        const w3 = activeRecentSpoken[s + 2];
+        if (w1.length < 2 && w2.length < 2) continue;
+
+        for (let i = nextSentenceStart; i <= nextSentenceEnd - 2; i++) {
+          if (isTokenMatch(tokens[i], w1)) {
+            let j = getNextNonParentheticalIndex(tokens, i + 1);
+            if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
+              j = i + 1;
+            }
+            if (j <= nextSentenceEnd && isTokenMatch(tokens[j], w2)) {
+              let k = getNextNonParentheticalIndex(tokens, j + 1);
+              if (j + 1 < tokens.length && tokens[j + 1].isParenthetical && isTokenMatch(tokens[j + 1], w3)) {
+                k = j + 1;
+              }
+              if (k <= nextSentenceEnd && isTokenMatch(tokens[k], w3)) {
+                return k;
+              }
+            }
+          }
+        }
       }
     }
 
-    // 2) 가이드라인 아래 다음 문장(ahead 5~25토큰) 탐색: 3글자 이상이며 불용어가 아닌 명확한 단어인 경우 점프 허용
-    const isDistinct = spWord.length >= 3 && !KOREAN_STOPWORDS.has(spWord);
-    if (isDistinct) {
-      for (let i = start + 3; i <= Math.min(tokens.length - 1, currentIndex + 25); i++) {
-        if (!tokens[i].isParenthetical && isTokenMatch(tokens[i], spWord)) {
-          return i;
+    // 2-B) 바로 아래 문장에서 2어절 연속 일치 (양쪽 단어 모두 길이 2 이상 필수)
+    if (activeRecentSpoken.length >= 2) {
+      for (let s = activeRecentSpoken.length - 2; s >= 0; s--) {
+        const w1 = activeRecentSpoken[s];
+        const w2 = activeRecentSpoken[s + 1];
+        // 단어 길이가 1글자이거나 단순 불용어만으로 구성된 2어절 점프 차단
+        if (w1.length < 2 || w2.length < 2) continue;
+        if (KOREAN_STOPWORDS.has(w1) && KOREAN_STOPWORDS.has(w2)) continue;
+
+        for (let i = nextSentenceStart; i <= nextSentenceEnd - 1; i++) {
+          let j = getNextNonParentheticalIndex(tokens, i + 1);
+          if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
+            j = i + 1;
+          }
+
+          if (isTokenMatch(tokens[i], w1) && j <= nextSentenceEnd && isTokenMatch(tokens[j], w2)) {
+            return j;
+          }
+
+          if (j <= nextSentenceEnd) {
+            const combinedW1 = tokens[i].cleanWord + tokens[j].cleanWord;
+            if (combinedW1 === w1 || isKoreanWordSimilar(combinedW1, w1)) {
+              let k = getNextNonParentheticalIndex(tokens, j + 1);
+              if (k <= nextSentenceEnd && isTokenMatch(tokens[k], w2)) {
+                return k;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // [3단계: Zone 3 - 2문장 이상 원거리 / 다음 단락 선행 점프 (엄격한 가드레일)]
+  // ★ 규칙: 2문장 이상 먼 곳이나 다음 단락으로 넘어가려면 반드시
+  //           '최신 발화 기준 3어절 이상 연속 일치'해야만 점프를 허용합니다!
+  //   단일 단어나 2어절로는 절대 다음 단락으로 건너뛰지 않습니다.
+  // =========================================================================
+  const zone3Start = nextSentenceEnd !== -1 ? nextSentenceEnd + 1 : currentSentenceEnd + 3;
+  const zone3End = Math.min(tokens.length - 1, startIdx + 50);
+
+  if (zone3Start <= zone3End && activeRecentSpoken.length >= 3) {
+    for (let s = activeRecentSpoken.length - 3; s >= 0; s--) {
+      const w1 = activeRecentSpoken[s];
+      const w2 = activeRecentSpoken[s + 1];
+      const w3 = activeRecentSpoken[s + 2];
+      // 3개 단어 중 최소 2개 이상은 2글자 이상이어야 유효
+      if ((w1.length >= 2 ? 1 : 0) + (w2.length >= 2 ? 1 : 0) + (w3.length >= 2 ? 1 : 0) < 2) {
+        continue;
+      }
+
+      for (let i = zone3Start; i <= zone3End - 2; i++) {
+        if (isTokenMatch(tokens[i], w1)) {
+          let j = getNextNonParentheticalIndex(tokens, i + 1);
+          if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
+            j = i + 1;
+          }
+          if (j <= zone3End && isTokenMatch(tokens[j], w2)) {
+            let k = getNextNonParentheticalIndex(tokens, j + 1);
+            if (j + 1 < tokens.length && tokens[j + 1].isParenthetical && isTokenMatch(tokens[j + 1], w3)) {
+              k = j + 1;
+            }
+            if (k <= zone3End && isTokenMatch(tokens[k], w3)) {
+              return k;
+            }
+          }
         }
       }
     }
