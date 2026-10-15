@@ -31,6 +31,8 @@ export interface WordToken {
   lineIndex: number;
   sentenceIndex: number;
   color?: string;            // 출연자/강조 텍스트 색상 (Hex 코드)
+  isParenthetical?: boolean; // 괄호 안에 포함된 지문/참고사항 단어 여부 (발화 스킵 대응)
+  altCleanWord?: string;     // 괄호 내 부가 영단어/약어 등 보조 매칭 단어
 }
 
 export interface ScriptLine {

@@ -369,10 +369,12 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 timeSinceVoice < 2400 || audioVolumeRef.current > 4;
 
               // 1단계: 가상 가이드 목표점(predictedTargetY)을 매 프레임 부드럽게 전진
-              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때도 즉시 점프하지 않고 초당 2.4배율로 매끄럽게 흡수
+              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때도 즉시 점프하지 않고 초당 2.4~4.5배율로 매끄럽게 흡수
               if (predictedTargetYRef.current < confirmedTargetYRef.current) {
                 const catchUpDiff = confirmedTargetYRef.current - predictedTargetYRef.current;
-                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * 2.4);
+                // 화자가 가이드라인 아래 문장을 읽어 앞서 나간 경우 더 기민하게 목표 위치 추종
+                const catchUpRate = catchUpDiff > lineHeightPx * 0.7 ? 4.5 : 2.4;
+                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * catchUpRate);
               }
 
               // - 화자가 말을 이어가는 동안 화자 예상 속도(predictedSpeedRef)로 끊김 없이 연속 전진
@@ -403,12 +405,17 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 const cruiseSpeed = isSpeakerActivelyReading
                   ? predictedSpeedRef.current * 0.88 * softCushion
                   : 0;
-                const gentleCorrectionSpeed = gapToPredicted * 0.78;
+                const gentleCorrectionSpeed = gapToPredicted * 0.85;
+
+                // 화자가 가이드라인 아래 문장을 읽어 격차가 벌어진 경우 신속히 정렬될 수 있도록 최대 속도 한도 확장
+                const maxAllowedVelocity = gapToPredicted > lineHeightPx * 0.7
+                  ? Math.min(lineHeightPx * 3.2, gapToPredicted * 2.2)
+                  : lineHeightPx * 1.35;
 
                 desiredVelocity = Math.min(
                   cruiseSpeed + gentleCorrectionSpeed,
-                  headroomToCeiling * 1.8,
-                  lineHeightPx * 1.15
+                  headroomToCeiling * 2.2,
+                  maxAllowedVelocity
                 );
               }
 
@@ -868,7 +875,9 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                   <span
                     key={`tok-${tok.index}`}
                     ref={(el) => (tokenElementsRef.current[tok.index] = el)}
-                    className="inline-block mr-[0.32em] px-0.5 rounded opacity-95"
+                    className={`inline-block mr-[0.32em] px-0.5 rounded ${
+                      tok.isParenthetical ? 'opacity-60 italic text-gray-400 font-normal' : 'opacity-95'
+                    }`}
                     style={tok.color ? { color: tok.color } : undefined}
                   >
                     {tok.word}

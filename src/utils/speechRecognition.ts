@@ -123,6 +123,7 @@ export function cleanWord(str: string): string {
   if (!str) return '';
   return str
     .toLowerCase()
+    .replace(/[\(\[\（\〔\【\〈\《\「\)\]\）\〕\】\〉\》\」]/g, '')
     .replace(/[^\w\sㄱ-ㅎㅏ-ㅣ가-힣]/g, '')
     .trim();
 }
@@ -274,6 +275,7 @@ export function tokenizeScript(text: string): {
       .filter(Boolean);
 
     let activeInlineColor: string | undefined = lineDefaultColor;
+    let inParentheses = false;
 
     sentenceChunks.forEach((chunk, chunkIdx) => {
       const rawWords = chunk.split(/\s+/).filter(Boolean);
@@ -313,11 +315,48 @@ export function tokenizeScript(text: string): {
 
         if (!trimmedWord) return;
 
-        const cleaned = cleanWord(trimmedWord);
+        // 괄호/지문 및 부가어절(영단어 병기 등) 분석
+        const OPEN_BRACKETS = '([（〔【〈《「';
+        const CLOSE_BRACKETS = ')]）〕】〉》」';
+        const hasOpen = [...trimmedWord].some((ch) => OPEN_BRACKETS.includes(ch));
+        const hasClose = [...trimmedWord].some((ch) => CLOSE_BRACKETS.includes(ch));
+
+        let isParenthetical = false;
+        let cleaned = cleanWord(trimmedWord);
+        let altCleaned: string | undefined;
+
+        if (inParentheses) {
+          isParenthetical = true;
+          if (hasClose) {
+            inParentheses = false;
+          }
+        } else if (hasOpen) {
+          if (hasClose) {
+            // (지문) 처럼 단어 전체가 괄호로 감싸져 있는 경우
+            const stripped = trimmedWord.replace(/[\(\[\（\〔\【\〈\《\「][^\)\]\）\〕\】\〉\》\」]*[\)\]\）\〕\】\〉\》\」]/g, '').trim();
+            if (!stripped) {
+              isParenthetical = true;
+            } else {
+              // 스마트폰(Smartphone) 처럼 본문 뒤에 괄호 설명/영단어가 병기된 경우
+              cleaned = cleanWord(stripped);
+              const parenMatch = trimmedWord.match(/[\(\[\（\〔\【\〈\《\「]([^\)\]\）\〕\】\〉\》\」]*)[\)\]\）\〕\】\〉\》\」]/);
+              if (parenMatch && parenMatch[1]) {
+                altCleaned = cleanWord(parenMatch[1]);
+              }
+            }
+          } else {
+            // (자료화면 처럼 괄호가 시작되어 다음 단어로 이어지는 경우
+            inParentheses = true;
+            isParenthetical = true;
+          }
+        }
+
         const token: WordToken = {
           index: tokenCounter,
           word: trimmedWord,
           cleanWord: cleaned,
+          altCleanWord: altCleaned,
+          isParenthetical,
           lineIndex: thisLineIdx,
           sentenceIndex: thisSentenceIdx,
           color: wordColor,
@@ -353,7 +392,36 @@ export function tokenizeScript(text: string): {
 }
 
 /**
- * 음성 인식된 텍스트와 대본 토큰을 엄격한 순차 전방(Sequential Forward-only) 방식으로 매칭합니다.
+ * 한국어 단일 음절 및 고빈도 조사/단어 (단일 단어로는 원거리 점프를 방지할 불용어 목록)
+ */
+const KOREAN_STOPWORDS = new Set([
+  '네', '예', '그', '이', '저', '수', '것', '등', '및', '또', '더', '잘', '못', '안', '다', '참', '좀',
+  '를', '을', '에', '와', '과', '도', '로', '으로', '하고', '에서', '에게', '한테'
+]);
+
+function isTokenMatch(token: WordToken | undefined, spokenWord: string): boolean {
+  if (!token || !spokenWord) return false;
+  if (token.cleanWord && (token.cleanWord === spokenWord || isKoreanWordSimilar(token.cleanWord, spokenWord))) {
+    return true;
+  }
+  if (token.altCleanWord && (token.altCleanWord === spokenWord || isKoreanWordSimilar(token.altCleanWord, spokenWord))) {
+    return true;
+  }
+  return false;
+}
+
+function getNextNonParentheticalIndex(tokens: WordToken[], fromIndex: number): number {
+  let idx = fromIndex;
+  while (idx < tokens.length && tokens[idx].isParenthetical) {
+    idx++;
+  }
+  return idx;
+}
+
+/**
+ * 음성 인식된 텍스트와 대본 토큰을 엄격하고 유연한 순차 전방(Sequential Forward-only) 방식으로 매칭합니다.
+ * 1. 괄호 지문((지문), [연출], 영어 병기 등)은 화자가 스킵해도 멈춤 없이 다음 본문으로 즉시 매칭
+ * 2. 화자가 가이드라인 아래 문장을 미리 읽는 경우(최대 40~60개 토큰 / 3~5줄 아래)도 다중 어절 매칭으로 정확히 감지
  */
 export function findMatchingTokenIndex(
   spokenPhrase: string,
@@ -369,48 +437,113 @@ export function findMatchingTokenIndex(
 
   if (spokenWords.length === 0) return null;
 
-  const recentSpoken = spokenWords.slice(-3);
-  const start = Math.max(0, currentIndex);
+  // 시작 위치: 현재 토큰이 괄호 안의 지문인 경우 다음 발화 토큰으로 자동 이동
+  let start = Math.max(0, currentIndex);
+  if (tokens[start]?.isParenthetical) {
+    start = getNextNonParentheticalIndex(tokens, start);
+  }
 
-  // 1. 최근 2단어 연속 일치 검색 (현재 위치 ~ 최대 +6단어 이내에서만 순차 탐색)
-  const pairEnd = Math.min(tokens.length - 1, currentIndex + 6);
-  if (recentSpoken.length >= 2) {
-    for (let s = recentSpoken.length - 2; s >= 0; s--) {
-      const w1 = recentSpoken[s];
-      const w2 = recentSpoken[s + 1];
+  // --- 1단계: 3어절 연속 일치 검색 (최대 +60토큰 앞까지, 가이드라인 아래 3~5문장 탐색) ---
+  const lookaheadEnd3 = Math.min(tokens.length - 1, currentIndex + 60);
+  if (spokenWords.length >= 3) {
+    for (let s = spokenWords.length - 3; s >= Math.max(0, spokenWords.length - 6); s--) {
+      const w1 = spokenWords[s];
+      const w2 = spokenWords[s + 1];
+      const w3 = spokenWords[s + 2];
+      if (w1.length < 2 && w2.length < 2) continue;
 
-      for (let i = start; i <= pairEnd - 1; i++) {
-        if (
-          isKoreanWordSimilar(tokens[i].cleanWord, w1) &&
-          isKoreanWordSimilar(tokens[i + 1].cleanWord, w2)
-        ) {
-          return i + 1;
+      for (let i = start; i <= lookaheadEnd3 - 2; i++) {
+        if (isTokenMatch(tokens[i], w1)) {
+          let j = getNextNonParentheticalIndex(tokens, i + 1);
+          if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
+            j = i + 1;
+          }
+          if (j < tokens.length && isTokenMatch(tokens[j], w2)) {
+            let k = getNextNonParentheticalIndex(tokens, j + 1);
+            if (j + 1 < tokens.length && tokens[j + 1].isParenthetical && isTokenMatch(tokens[j + 1], w3)) {
+              k = j + 1;
+            }
+            if (k < tokens.length && isTokenMatch(tokens[k], w3)) {
+              return k;
+            }
+          }
         }
       }
     }
   }
 
-  // 2. 단일 단어 일치 검색: 오직 현재 단어(currentIndex) 또는 바로 다음 1~2단어(currentIndex + 1, +2)만 허용!
-  const singleEnd = Math.min(tokens.length - 1, currentIndex + 2);
-  const latestTwoWords = spokenWords.slice(-2);
+  // --- 2단계: 2어절 연속 일치 검색 (최대 +45토큰 앞까지, 가이드라인 아래 2~4문장 탐색) ---
+  const lookaheadEnd2 = Math.min(tokens.length - 1, currentIndex + 45);
+  if (spokenWords.length >= 2) {
+    for (let s = spokenWords.length - 2; s >= Math.max(0, spokenWords.length - 5); s--) {
+      const w1 = spokenWords[s];
+      const w2 = spokenWords[s + 1];
+      if (w1.length < 2 && w2.length < 2) continue;
 
-  for (let s = latestTwoWords.length - 1; s >= 0; s--) {
-    const spWord = latestTwoWords[s];
+      for (let i = start; i <= lookaheadEnd2 - 1; i++) {
+        let j = getNextNonParentheticalIndex(tokens, i + 1);
+        if (i + 1 < tokens.length && tokens[i + 1].isParenthetical && isTokenMatch(tokens[i + 1], w2)) {
+          j = i + 1;
+        }
+
+        // Case A: tokens[i] matches w1, tokens[j] matches w2
+        if (isTokenMatch(tokens[i], w1) && j < tokens.length && isTokenMatch(tokens[j], w2)) {
+          return j;
+        }
+
+        // Case B: 한국어 띄어쓰기 차이 (예: 대본은 '첫' '번째', 음성은 '첫번째' + '항목을')
+        if (j < tokens.length) {
+          const combinedW1 = tokens[i].cleanWord + tokens[j].cleanWord;
+          if (combinedW1 === w1 || isKoreanWordSimilar(combinedW1, w1)) {
+            let k = getNextNonParentheticalIndex(tokens, j + 1);
+            if (k < tokens.length && isTokenMatch(tokens[k], w2)) {
+              return k;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // --- 3단계: 한국어 띄어쓰기 결합/분리 복합어 검색 (최대 +30토큰 앞까지) ---
+  const lookaheadEndCompound = Math.min(tokens.length - 1, currentIndex + 30);
+  for (let s = spokenWords.length - 1; s >= Math.max(0, spokenWords.length - 3); s--) {
+    const spWord = spokenWords[s];
+    if (spWord.length < 3) continue;
+
+    for (let i = start; i <= lookaheadEndCompound; i++) {
+      let j = getNextNonParentheticalIndex(tokens, i + 1);
+      if (j < tokens.length) {
+        const combined = tokens[i].cleanWord + tokens[j].cleanWord;
+        if (combined === spWord || isKoreanWordSimilar(combined, spWord)) {
+          return j;
+        }
+      }
+    }
+  }
+
+  // --- 4단계: 단일 단어 일치 검색 ---
+  const latestSpoken = spokenWords.slice(-2);
+  for (let s = latestSpoken.length - 1; s >= 0; s--) {
+    const spWord = latestSpoken[s];
     if (spWord.length < 2) continue;
 
-    for (let i = start; i <= singleEnd; i++) {
-      if (
-        i > currentIndex &&
-        isKoreanWordSimilar(tokens[i].cleanWord, tokens[currentIndex].cleanWord)
-      ) {
-        const matchCountInSpoken = latestTwoWords.filter((w) =>
-          isKoreanWordSimilar(tokens[i].cleanWord, w)
-        ).length;
-        if (matchCountInSpoken < 2) continue;
-      }
-
-      if (tokens[i].cleanWord === spWord || isKoreanWordSimilar(tokens[i].cleanWord, spWord)) {
+    // 1) 직전/직후 어절 탐색 (괄호 지문 건너뛰며 다음 4개 발화 단어 탐색)
+    let nonParenCount = 0;
+    for (let i = start; i < tokens.length && nonParenCount <= 4 && i <= currentIndex + 10; i++) {
+      if (!tokens[i].isParenthetical) nonParenCount++;
+      if (isTokenMatch(tokens[i], spWord)) {
         return i;
+      }
+    }
+
+    // 2) 가이드라인 아래 다음 문장(ahead 5~25토큰) 탐색: 3글자 이상이며 불용어가 아닌 명확한 단어인 경우 점프 허용
+    const isDistinct = spWord.length >= 3 && !KOREAN_STOPWORDS.has(spWord);
+    if (isDistinct) {
+      for (let i = start + 3; i <= Math.min(tokens.length - 1, currentIndex + 25); i++) {
+        if (!tokens[i].isParenthetical && isTokenMatch(tokens[i], spWord)) {
+          return i;
+        }
       }
     }
   }
