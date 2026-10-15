@@ -352,6 +352,16 @@ export function App() {
           e.preventDefault();
           handleAdvanceLine();
           break;
+        case 'PageUp':
+          e.preventDefault();
+          // 페이지 업: 화면의 80% 위로 부드럽게 스크롤
+          window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: -1 } }));
+          break;
+        case 'PageDown':
+          e.preventDefault();
+          // 페이지 다운: 화면의 80% 아래로 부드럽게 스크롤
+          window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: 1 } }));
+          break;
         case 'KeyR':
           e.preventDefault();
           handleReset();

@@ -460,27 +460,26 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
     onSyncGuideTokenIndex,
   ]);
 
-  // 4. Mouse Wheel handler: allows placing any sentence at the reading guide line with the mouse
-  const handleUserWheel = useCallback(
-    (e: React.WheelEvent) => {
+  // 4. Mouse Wheel and PageUp/PageDown handler: allows manual scrolling anywhere on the screen
+  const performManualScrollDelta = useCallback(
+    (deltaPixels: number) => {
       const viewport = viewportRef.current;
       const track = contentTrackRef.current;
       if (!viewport || !track) return;
 
-      isGlidingManualRef.current = false;
-      velocityRef.current = 0;
-
       const maxScrollY = Math.max(0, track.scrollHeight - viewport.clientHeight);
-      const nextY = Math.max(0, Math.min(maxScrollY, scrollYRef.current + e.deltaY * 0.85));
-      scrollYRef.current = nextY;
+      const currentManualBase = isGlidingManualRef.current ? manualTargetYRef.current : scrollYRef.current;
+      const nextY = Math.max(0, Math.min(maxScrollY, currentManualBase + deltaPixels));
+
+      manualTargetYRef.current = nextY;
       confirmedTargetYRef.current = nextY;
       predictedTargetYRef.current = nextY;
-      maxSafeCeilingYRef.current = nextY + lineHeightPx * 0.35;
+      maxSafeCeilingYRef.current = nextY + lineHeightPx * 0.45;
       lastConfirmedYRef.current = nextY;
-      manualTargetYRef.current = nextY;
-      track.style.transform = `translate3d(0, -${nextY.toFixed(2)}px, 0)`;
+      velocityRef.current = 0;
+      isGlidingManualRef.current = true;
 
-      // Immediately sync active starting token to the sentence placed at the guide line
+      // Sync active starting sentence to the new guide line position
       const guideHit = findTokenAtGuideLine();
       if (guideHit) {
         lastSyncedSentenceRef.current = guideHit.sentenceIndex;
@@ -489,6 +488,45 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
     },
     [findTokenAtGuideLine, onSelectTokenIndex, lineHeightPx]
   );
+
+  // Global window wheel event listener to ensure mouse wheel works anywhere on screen
+  useEffect(() => {
+    const handleGlobalWheel = (e: WheelEvent) => {
+      // Don't intercept scroll inside drawer or modals if they are scrollable
+      const target = e.target as HTMLElement;
+      if (target?.closest?.('.overflow-y-auto')) {
+        return;
+      }
+
+      e.preventDefault();
+      // Apply intuitive wheel delta with sensible scaling
+      const delta = e.deltaY * 0.95;
+      performManualScrollDelta(delta);
+    };
+
+    window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+    return () => {
+      window.removeEventListener('wheel', handleGlobalWheel);
+    };
+  }, [performManualScrollDelta]);
+
+  // PageUp / PageDown handler
+  useEffect(() => {
+    const handlePageScroll = (e: Event) => {
+      const customEvt = e as CustomEvent<{ direction: number }>;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+
+      const pageSize = viewport.clientHeight * 0.75;
+      const delta = customEvt.detail.direction * pageSize;
+      performManualScrollDelta(delta);
+    };
+
+    window.addEventListener('prompter-page-scroll', handlePageScroll);
+    return () => {
+      window.removeEventListener('prompter-page-scroll', handlePageScroll);
+    };
+  }, [performManualScrollDelta]);
 
   // Theme styles
   const getThemeClass = () => {
@@ -521,7 +559,6 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
   return (
     <div
       ref={viewportRef}
-      onWheel={handleUserWheel}
       className={`relative w-full h-screen overflow-hidden select-none ${getThemeClass()}`}
     >
       {/* 강사가 아직 첫 발화를 시작하기 전 안내 배너 */}
