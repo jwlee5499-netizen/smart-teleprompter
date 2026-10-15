@@ -306,8 +306,13 @@ export function App() {
   }, []);
 
   // 스크롤이 진행됨에 따라 현재 가이드라인에 위치한 문장의 첫 토큰 인덱스를 동기화
-  const handleSyncGuideTokenIndex = useCallback((index: number) => {
-    if (index > tokenIndexRef.current) {
+  const handleSyncGuideTokenIndex = useCallback((index: number, isManualSeek: boolean = false) => {
+    if (isManualSeek) {
+      tokenIndexRef.current = index;
+      setCurrentSpokenTokenIndex(index);
+      lastManualJumpTimeRef.current = performance.now();
+      setHasSpokenStarted(false); // 수동 스크롤/휠로 위치를 바꾼 경우 화자가 다시 읽을 때까지 대기
+    } else if (index > tokenIndexRef.current) {
       tokenIndexRef.current = index;
       setCurrentSpokenTokenIndex(index);
     }
@@ -323,6 +328,17 @@ export function App() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+
+      if (e.key === 'PageUp' || e.key === 'Prior') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: -1 } }));
+        return;
+      }
+      if (e.key === 'PageDown' || e.key === 'Next') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: 1 } }));
+        return;
+      }
 
       switch (e.code) {
         case 'Space':
@@ -354,12 +370,10 @@ export function App() {
           break;
         case 'PageUp':
           e.preventDefault();
-          // 페이지 업: 화면의 80% 위로 부드럽게 스크롤
           window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: -1 } }));
           break;
         case 'PageDown':
           e.preventDefault();
-          // 페이지 다운: 화면의 80% 아래로 부드럽게 스크롤
           window.dispatchEvent(new CustomEvent('prompter-page-scroll', { detail: { direction: 1 } }));
           break;
         case 'KeyR':

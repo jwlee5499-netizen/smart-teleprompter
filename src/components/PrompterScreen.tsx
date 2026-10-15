@@ -15,7 +15,7 @@ interface PrompterScreenProps {
   settings: PrompterSettings;
   onUpdateProgress: (percent: number) => void;
   onSelectTokenIndex: (index: number, startPlaying?: boolean) => void;
-  onSyncGuideTokenIndex?: (index: number) => void;
+  onSyncGuideTokenIndex?: (index: number, isManualSeek?: boolean) => void;
   onHoverTokenIndex?: (index: number | null) => void;
   onUpdateSettings?: (newSettings: Partial<PrompterSettings>) => void;
   onRewindLine?: () => void;
@@ -71,6 +71,14 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
   currentTokenIdxRef.current = currentSpokenTokenIndex;
   const audioVolumeRef = useRef<number>(audioVolume);
   audioVolumeRef.current = audioVolume;
+  const manualSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (manualSyncTimerRef.current) clearTimeout(manualSyncTimerRef.current);
+    };
+  }, []);
 
   // Track microphone vocal activity so continuous predictive glide stays alive while speaking
   useEffect(() => {
@@ -308,10 +316,10 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
         const maxScrollY = Math.max(0, track.scrollHeight - viewport.clientHeight);
 
         if (isGlidingManualRef.current) {
-          // Smooth studio camera glide when user presses ← (한 문장 위로) or clicks a starting sentence with mouse
+          // Smooth studio camera glide when user presses ← (한 문장 위로), clicks a starting sentence, or uses mouse wheel / PageUp / PageDown
           const diff = manualTargetYRef.current - scrollYRef.current;
           if (Math.abs(diff) > 0.6) {
-            scrollYRef.current += diff * Math.min(1, dt * 10);
+            scrollYRef.current += diff * Math.min(1, dt * 18);
             confirmedTargetYRef.current = manualTargetYRef.current;
             predictedTargetYRef.current = manualTargetYRef.current;
           } else {
@@ -319,6 +327,22 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
             confirmedTargetYRef.current = manualTargetYRef.current;
             predictedTargetYRef.current = manualTargetYRef.current;
             isGlidingManualRef.current = false;
+
+            // When manual glide finishes, align reading token bounds to guideline
+            const guideHit = findTokenAtGuideLine();
+            if (guideHit) {
+              lastSyncedSentenceRef.current = guideHit.sentenceIndex;
+              const bounds = computeTargetBoundsForToken(guideHit.tokenIndex, false);
+              if (bounds) {
+                confirmedTargetYRef.current = bounds.confirmedY;
+                predictedTargetYRef.current = bounds.confirmedY;
+                maxSafeCeilingYRef.current = bounds.safeCeilingY;
+                lastConfirmedYRef.current = bounds.confirmedY;
+              }
+              if (onSyncGuideTokenIndex) {
+                onSyncGuideTokenIndex(guideHit.tokenIndex, true);
+              }
+            }
           }
         } else if (isPlaying) {
           if (!settings.voiceTracking) {
@@ -458,6 +482,7 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
     onUpdateProgress,
     findTokenAtGuideLine,
     onSyncGuideTokenIndex,
+    computeTargetBoundsForToken,
   ]);
 
   // 4. Mouse Wheel and PageUp/PageDown handler: allows manual scrolling anywhere on the screen
@@ -479,14 +504,19 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       velocityRef.current = 0;
       isGlidingManualRef.current = true;
 
-      // Sync active starting sentence to the new guide line position
-      const guideHit = findTokenAtGuideLine();
-      if (guideHit) {
-        lastSyncedSentenceRef.current = guideHit.sentenceIndex;
-        onSelectTokenIndex(guideHit.tokenIndex, false);
+      // Debounce guideline token sync to prevent thrashing and to ensure DOM has updated
+      if (manualSyncTimerRef.current) {
+        clearTimeout(manualSyncTimerRef.current);
       }
+      manualSyncTimerRef.current = setTimeout(() => {
+        const guideHit = findTokenAtGuideLine();
+        if (guideHit && onSyncGuideTokenIndex) {
+          lastSyncedSentenceRef.current = guideHit.sentenceIndex;
+          onSyncGuideTokenIndex(guideHit.tokenIndex, true);
+        }
+      }, 120);
     },
-    [findTokenAtGuideLine, onSelectTokenIndex, lineHeightPx]
+    [findTokenAtGuideLine, onSyncGuideTokenIndex, lineHeightPx]
   );
 
   // Global window wheel event listener to ensure mouse wheel works anywhere on screen
@@ -499,20 +529,41 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       }
 
       e.preventDefault();
-      // Apply intuitive wheel delta with sensible scaling
-      const delta = e.deltaY * 0.95;
-      performManualScrollDelta(delta);
+      // Apply intuitive wheel delta with sensible scaling & mode normalization
+      let delta = e.deltaY;
+      if (e.deltaMode === 1) {
+        delta *= lineHeightPx;
+      } else if (e.deltaMode === 2) {
+        delta *= (viewportRef.current?.clientHeight || 600);
+      }
+      performManualScrollDelta(delta * 0.95);
     };
 
-    window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+    window.addEventListener('wheel', handleGlobalWheel, { capture: true, passive: false });
     return () => {
-      window.removeEventListener('wheel', handleGlobalWheel);
+      window.removeEventListener('wheel', handleGlobalWheel, { capture: true });
     };
-  }, [performManualScrollDelta]);
+  }, [performManualScrollDelta, lineHeightPx]);
 
-  // PageUp / PageDown handler
+  // PageUp / PageDown keyboard and custom event handler
   useEffect(() => {
-    const handlePageScroll = (e: Event) => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+
+      const isPageUp = e.key === 'PageUp' || e.code === 'PageUp' || e.key === 'Prior';
+      const isPageDown = e.key === 'PageDown' || e.code === 'PageDown' || e.key === 'Next';
+
+      if (isPageUp || isPageDown) {
+        e.preventDefault();
+        e.stopPropagation();
+        const viewport = viewportRef.current;
+        const pageSize = viewport ? viewport.clientHeight * 0.75 : 450;
+        const delta = isPageUp ? -pageSize : pageSize;
+        performManualScrollDelta(delta);
+      }
+    };
+
+    const handleCustomPageScroll = (e: Event) => {
       const customEvt = e as CustomEvent<{ direction: number }>;
       const viewport = viewportRef.current;
       if (!viewport) return;
@@ -522,9 +573,11 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       performManualScrollDelta(delta);
     };
 
-    window.addEventListener('prompter-page-scroll', handlePageScroll);
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('prompter-page-scroll', handleCustomPageScroll);
     return () => {
-      window.removeEventListener('prompter-page-scroll', handlePageScroll);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('prompter-page-scroll', handleCustomPageScroll);
     };
   }, [performManualScrollDelta]);
 
