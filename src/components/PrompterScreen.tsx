@@ -179,12 +179,62 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
         Math.max(lineHeightPx * 0.75, nextRowY - currentRowY)
       );
 
-      // 현재 읽고 있는 줄이 항상 가이드라인 포커스 밴드 중앙에 안정적으로 머물도록 안착
-      // 줄 내부의 어절 진행률(0% ~ 16%)은 시선이 가이드라인 밖으로 튀지 않도록 아주 완만하게 유지
+      // 1. 현재 문장의 경계 및 마지막 유효 어절 인덱스 계산
+      const currentSentenceIdx = tok.sentenceIndex;
+      let sentenceEndIdx = clampedIdx;
+      while (
+        sentenceEndIdx + 1 < tokens.length &&
+        tokens[sentenceEndIdx + 1].sentenceIndex === currentSentenceIdx
+      ) {
+        sentenceEndIdx++;
+      }
+
+      // 문장 내 마지막 비지문 어절
+      let lastNonParenSentenceTokenIdx = sentenceEndIdx;
+      while (lastNonParenSentenceTokenIdx > rowStartIdx && tokens[lastNonParenSentenceTokenIdx]?.isParenthetical) {
+        lastNonParenSentenceTokenIdx--;
+      }
+
+      const isAtSentenceEnd = clampedIdx >= lastNonParenSentenceTokenIdx;
+
+      // 2. 다음 문장의 첫 번째 어절 및 DOM 위치 확인
+      let nextSentenceFirstTokenIdx = -1;
+      for (let i = sentenceEndIdx + 1; i < tokens.length; i++) {
+        if (tokens[i].sentenceIndex > currentSentenceIdx && !tokens[i].isParenthetical) {
+          nextSentenceFirstTokenIdx = i;
+          break;
+        }
+      }
+
+      let nextSentenceY = -1;
+      if (nextSentenceFirstTokenIdx !== -1) {
+        const nextSentenceEl = sentenceElementsRef.current.get(tokens[nextSentenceFirstTokenIdx].sentenceIndex);
+        const nextTokenEl = tokenElementsRef.current[nextSentenceFirstTokenIdx];
+        const nextTargetEl = nextSentenceEl || nextTokenEl;
+        if (nextTargetEl) {
+          nextSentenceY = getElementTargetY(nextTargetEl);
+        }
+      }
+
+      // [핵심 기능: 지금 말하는 스크립트가 끝나면 자연스럽게 다음 문장이 가이드라인에 오도록 전환]
+      if (isAtSentenceEnd && nextSentenceY > currentRowY) {
+        const confirmedY = nextSentenceY;
+        const safeCeilingY = nextSentenceY + lineHeightPx * 0.15;
+        return { confirmedY, safeCeilingY };
+      }
+
+      // 긴 문장 내에서 한 줄이 끝나 다음 줄(nextRow)로 줄바꿈될 때
+      const isAtRowEnd = clampedIdx === rowEndIdx - 1;
+      if (isAtRowEnd && nextRowStartIdx !== -1 && nextRowY > currentRowY) {
+        const confirmedY = nextRowY;
+        const safeCeilingY = nextRowY + lineHeightPx * 0.15;
+        return { confirmedY, safeCeilingY };
+      }
+
+      // 문장 및 줄 내부를 순차적으로 읽고 있는 동안:
+      // 시선이 흔들리지 않도록 현재 줄을 가이드라인 중앙에 안정적으로 유지
       const progressFraction = Math.min(1, wordOrderInRow / Math.max(1, tokensInRow - 1));
       const confirmedY = currentRowY + progressFraction * (rowDelta * 0.16);
-
-      // 음성 인식이 단어 단위로 들어올 때 다음 줄(nextRowY)이 가이드라인 위로 튀어 올라가지 않도록 안전 상한선 설정
       const safeCeilingY = currentRowY + Math.min(rowDelta * 0.40, ((wordOrderInRow + 1.2) / tokensInRow) * rowDelta * 0.45);
 
       return { confirmedY, safeCeilingY };
@@ -398,7 +448,7 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 const cruiseSpeed = isSpeakerActivelyReading
                   ? Math.min(lineHeightPx * 0.78, predictedSpeedRef.current * 0.80) * softCushion
                   : 0;
-                const gentleCorrectionSpeed = gapToPredicted * 0.50;
+                const gentleCorrectionSpeed = gapToPredicted * 0.72;
 
                 // 속도가 너무 빠르게 치솟지 않도록 최고 속도를 lineHeightPx * 1.22로 엄격하고 차분하게 제한
                 const maxSafeVelocity = lineHeightPx * 1.22;
