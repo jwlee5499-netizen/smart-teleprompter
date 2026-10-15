@@ -198,6 +198,46 @@ export function isKoreanWordSimilar(scriptWord: string, spokenWord: string): boo
 }
 
 /**
+ * 괄호( 지문, 외래어/영문 병기 등 ) 내부의 공백이 일반 어절 분리로 쪼개지지 않도록 보존하여 어절 목록을 추출합니다.
+ * 예: "카슨(Anne Carson)을 발표했는데요" -> ["카슨(Anne Carson)을", "발표했는데요"]
+ * 예: "(자료화면 제시 15초) 다음으로" -> ["(자료화면 제시 15초)", "다음으로"]
+ */
+export function extractWordsPreservingParentheses(str: string): string[] {
+  const words: string[] = [];
+  let current = '';
+  let inParen = false;
+
+  const OPEN_BRACKETS = '([（〔【〈《「';
+  const CLOSE_BRACKETS = ')]）〕】〉》」';
+
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (OPEN_BRACKETS.includes(ch)) {
+      inParen = true;
+      current += ch;
+    } else if (CLOSE_BRACKETS.includes(ch)) {
+      inParen = false;
+      current += ch;
+    } else if (/\s/.test(ch)) {
+      if (inParen) {
+        current += ch;
+      } else {
+        if (current.trim()) {
+          words.push(current.trim());
+          current = '';
+        }
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) {
+    words.push(current.trim());
+  }
+  return words;
+}
+
+/**
  * 대본 텍스트를 문장(Sentence) 단위의 라인 구조, 단어 토큰, 챕터 태그, 폰트 색상으로 파싱
  */
 export function tokenizeScript(text: string): {
@@ -317,10 +357,9 @@ export function tokenizeScript(text: string): {
       .filter(Boolean);
 
     let activeInlineColor: string | undefined = lineDefaultColor;
-    let inParentheses = false;
 
     sentenceChunks.forEach((chunk, chunkIdx) => {
-      const rawWords = chunk.split(/\s+/).filter(Boolean);
+      const rawWords = extractWordsPreservingParentheses(chunk);
       if (rawWords.length === 0) return;
 
       const thisLineIdx = lineCounter++;
@@ -357,7 +396,7 @@ export function tokenizeScript(text: string): {
 
         if (!trimmedWord) return;
 
-        // 괄호/지문 및 부가어절(영단어 병기 등) 분석
+        // 괄호/지문 및 부가어절(영단어/외래어 병기 등) 분석
         const OPEN_BRACKETS = '([（〔【〈《「';
         const CLOSE_BRACKETS = ')]）〕】〉》」';
         const hasOpen = [...trimmedWord].some((ch) => OPEN_BRACKETS.includes(ch));
@@ -367,29 +406,27 @@ export function tokenizeScript(text: string): {
         let cleaned = cleanWord(trimmedWord);
         let altCleaned: string | undefined;
 
-        if (inParentheses) {
-          isParenthetical = true;
-          if (hasClose) {
-            inParentheses = false;
-          }
-        } else if (hasOpen) {
-          if (hasClose) {
-            // (지문) 처럼 단어 전체가 괄호로 감싸져 있는 경우
-            const stripped = trimmedWord.replace(/[\(\[\（\〔\【\〈\《\「][^\)\]\）\〕\】\〉\》\」]*[\)\]\）\〕\】\〉\》\」]/g, '').trim();
-            if (!stripped) {
-              isParenthetical = true;
-            } else {
-              // 스마트폰(Smartphone) 처럼 본문 뒤에 괄호 설명/영단어가 병기된 경우
-              cleaned = cleanWord(stripped);
-              const parenMatch = trimmedWord.match(/[\(\[\（\〔\【\〈\《\「]([^\)\]\）\〕\】\〉\》\」]*)[\)\]\）\〕\】\〉\》\」]/);
-              if (parenMatch && parenMatch[1]) {
-                altCleaned = cleanWord(parenMatch[1]);
-              }
-            }
-          } else {
-            // (자료화면 처럼 괄호가 시작되어 다음 단어로 이어지는 경우
-            inParentheses = true;
+        if (hasOpen || hasClose) {
+          // 괄호 안의 내용을 완전히 제거했을 때 외부에 남는 한국어/텍스트 확인
+          const stripped = trimmedWord
+            .replace(/[\(\[\（\〔\【\〈\《\「][^\)\]\）\〕\】\〉\》\」]*[\)\]\）\〕\】\〉\》\」]/g, '')
+            .trim();
+
+          if (!stripped) {
+            // (자료화면 제시), (웃음) 등 괄호 밖 텍스트가 없는 순수 지문/비발화 연출
             isParenthetical = true;
+            cleaned = '';
+          } else {
+            // "카슨(Anne Carson)을" 또는 "스마트폰(Smartphone)" 처럼 본문 명사/조사에 괄호 병기가 붙은 경우:
+            // 괄호 밖의 본문(예: "카슨을", "스마트폰")을 기본 cleanWord로 추출하여 음성인식의 기준어로 삼습니다.
+            cleaned = cleanWord(stripped);
+            isParenthetical = false;
+
+            // 괄호 안의 내용(예: "Anne Carson", "Smartphone")도 보조 인식어(altCleanWord)로 등록
+            const parenMatch = trimmedWord.match(/[\(\[\（\〔\【\〈\《\「]([^\)\]\）\〕\】\〉\》\」]*)[\)\]\）\〕\】\〉\》\」]/);
+            if (parenMatch && parenMatch[1]) {
+              altCleaned = cleanWord(parenMatch[1]);
+            }
           }
         }
 
@@ -446,8 +483,14 @@ function isTokenMatch(token: WordToken | undefined, spokenWord: string): boolean
   if (token.cleanWord && (token.cleanWord === spokenWord || isKoreanWordSimilar(token.cleanWord, spokenWord))) {
     return true;
   }
-  if (token.altCleanWord && (token.altCleanWord === spokenWord || isKoreanWordSimilar(token.altCleanWord, spokenWord))) {
-    return true;
+  if (token.altCleanWord) {
+    if (token.altCleanWord === spokenWord || isKoreanWordSimilar(token.altCleanWord, spokenWord)) {
+      return true;
+    }
+    // 영어 병기 또는 복합어 (예: "anne carson" 안에 "carson" 또는 "anne"이 포함된 경우)
+    if (token.altCleanWord.split(/\s+/).some((w) => w === spokenWord || isKoreanWordSimilar(w, spokenWord))) {
+      return true;
+    }
   }
   return false;
 }
@@ -466,10 +509,11 @@ function getNextNonParentheticalIndex(tokens: WordToken[], fromIndex: number): n
  * [핵심 원칙: 지역성 최우선 (Proximity Priority) 및 계층형 가드레일]
  * 1. 현재 읽고 있는 문장(Zone 1) 우선 매칭:
  *    - 현재 문장 내에 발화된 단어가 존재하면 절대 다음 문장이나 다른 단락으로 건너뛰지 않습니다.
- *    - 같은 단어(예: "우리가", "오늘")가 다음 단락에 반복되어 있더라도 현재 문장에서 먼저 소비되므로 단락 점프 오작동이 100% 원천 차단됩니다.
+ *    - 같은 단어(예: "우리가", "오늘", "카슨")가 다음 단락이나 다음 문장에 있더라도
+ *      현재 문장 내부에서 먼저 완전히 소비되므로 문장/단락 점프 오작동이 원천 차단됩니다.
  * 2. 가이드라인 바로 아래 문장(Zone 2) 선행 읽기 대응:
- *    - 현재 문장에 매칭되지 않고, 화자가 바로 아래 문장을 2어절 이상 연속으로 읽을 때만 다음 문장으로 자연스럽게 전진합니다.
- *    - 단일 단어로는 다음 문장으로 점프할 수 없습니다.
+ *    - 현재 문장을 다 읽었거나(startIdx >= currentSentenceEnd), 화자가 바로 아래 문장을 2어절 이상 연속으로 읽을 때만
+ *      다음 문장으로 자연스럽게 전진합니다. 아직 현재 문장을 읽는 중에는 단일 단어로 다음 문장으로 점프할 수 없습니다.
  * 3. 2문장 이상 원거리/다음 단락(Zone 3) 점프 제한:
  *    - 2문장 이상 먼 곳이나 다음 단락으로 넘어가려면 반드시 최신 발화 기준 3어절 이상 연속 일치해야만 허용됩니다.
  * 4. 괄호 지문 스킵:
@@ -507,8 +551,10 @@ export function findMatchingTokenIndex(
     currentSentenceEnd++;
   }
 
-  // 문장 간 전환(현재 문장 끝 어절 -> 다음 문장 첫 1~2어절)도 자연스럽게 포함
-  const zone1End = Math.min(tokens.length - 1, currentSentenceEnd + 2);
+  // ★ 핵심: Zone 1은 엄격히 '현재 문장 끝(currentSentenceEnd)'까지만 탐색합니다.
+  // 다음 문장의 첫 어절로 Zone 1이 누수되면, 동일 단어나 유사어가 반복될 때
+  // 단일 단어로도 다음 문장으로 튕겨 올라가는 치명적 오류가 발생하므로 누수되지 않도록 엄격히 차단합니다.
+  const zone1End = currentSentenceEnd;
 
   // 다음 문장(Zone 2)의 경계 계산
   let nextSentenceStart = -1;
@@ -689,6 +735,19 @@ export function findMatchingTokenIndex(
               }
             }
           }
+        }
+      }
+    }
+
+    // 2-C) 현재 문장이 이미 끝까지 완독된 상태(startIdx >= currentSentenceEnd)에서만
+    //      다음 문장의 첫 번째 단어 단일 매칭을 허용합니다.
+    //      (아직 현재 문장을 읽는 중에는 단일 단어로 다음 문장으로 절대 넘어가지 못합니다.)
+    if (startIdx >= currentSentenceEnd) {
+      for (let s = activeRecentSpoken.length - 1; s >= 0; s--) {
+        const spWord = activeRecentSpoken[s];
+        if (spWord.length < 2) continue;
+        if (isTokenMatch(tokens[nextSentenceStart], spWord)) {
+          return nextSentenceStart;
         }
       }
     }
