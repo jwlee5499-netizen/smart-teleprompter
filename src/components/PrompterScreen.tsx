@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { PrompterSettings, WordToken, ScriptLine, ChapterMarker } from '../types';
 import { ChevronUp, ChevronDown, Bookmark, List, X, RotateCcw, FastForward, MousePointerClick } from 'lucide-react';
+import { globalAudioState } from '../utils/speechRecognition';
 
 interface PrompterScreenProps {
   lines: ScriptLine[];
@@ -22,7 +23,7 @@ interface PrompterScreenProps {
   onAdvanceLine?: () => void;
 }
 
-export const PrompterScreen: React.FC<PrompterScreenProps> = ({
+const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
   lines,
   tokens,
   chapters = [],
@@ -67,6 +68,7 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
 
   const lastSyncedSentenceRef = useRef<number>(0);
   const animFrameRef = useRef<number | null>(null);
+  const lastReportedProgressRef = useRef<number>(-1);
   const currentTokenIdxRef = useRef<number>(currentSpokenTokenIndex);
   currentTokenIdxRef.current = currentSpokenTokenIndex;
   const audioVolumeRef = useRef<number>(audioVolume);
@@ -413,9 +415,12 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
             if (!hasSpokenStarted) {
               velocityRef.current = 0;
             } else {
-              const timeSinceVoice = now - lastActiveVoiceTimeRef.current;
+              const timeSinceVoice = Math.min(
+                now - lastActiveVoiceTimeRef.current,
+                now - globalAudioState.lastVoiceTime
+              );
               const isSpeakerActivelyReading =
-                timeSinceVoice < 2400 || audioVolumeRef.current > 4;
+                timeSinceVoice < 2400 || audioVolumeRef.current > 4 || globalAudioState.volume > 4;
 
               // 1단계: 가상 가이드 목표점(predictedTargetY)을 매 프레임 전진
               // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때는 초당 8.0배율로 빠르게 수렴
@@ -506,10 +511,13 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
         track.style.transform = `translate3d(0, -${scrollYRef.current.toFixed(2)}px, 0)`;
 
         // Periodically update progress bar & manual scroll sentence index
-        if (frameCount % 8 === 0) {
+        if (frameCount % 16 === 0) {
           if (maxScrollY > 0) {
             const pct = Math.min(100, Math.max(0, (scrollYRef.current / maxScrollY) * 100));
-            onUpdateProgress(pct);
+            if (Math.abs(pct - lastReportedProgressRef.current) >= 0.4) {
+              lastReportedProgressRef.current = pct;
+              onUpdateProgress(pct);
+            }
           }
 
           // 수동 스크롤 모드(음성 동조 OFF)일 때만 스크롤 위치로 현재 문장 인덱스 동기화
@@ -943,3 +951,24 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
     </div>
   );
 };
+
+export const PrompterScreen = React.memo(PrompterScreenComponent, (prev, next) => {
+  return (
+    prev.currentSpokenTokenIndex === next.currentSpokenTokenIndex &&
+    prev.speechMatchCount === next.speechMatchCount &&
+    prev.manualJumpRevision === next.manualJumpRevision &&
+    prev.hasSpokenStarted === next.hasSpokenStarted &&
+    prev.isPlaying === next.isPlaying &&
+    prev.settings === next.settings &&
+    prev.lines === next.lines &&
+    prev.tokens === next.tokens &&
+    prev.chapters === next.chapters &&
+    prev.onUpdateProgress === next.onUpdateProgress &&
+    prev.onSelectTokenIndex === next.onSelectTokenIndex &&
+    prev.onSyncGuideTokenIndex === next.onSyncGuideTokenIndex &&
+    prev.onHoverTokenIndex === next.onHoverTokenIndex &&
+    prev.onUpdateSettings === next.onUpdateSettings &&
+    prev.onRewindLine === next.onRewindLine &&
+    prev.onAdvanceLine === next.onAdvanceLine
+  );
+});

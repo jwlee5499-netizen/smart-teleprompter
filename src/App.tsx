@@ -322,6 +322,10 @@ export function App() {
     hoveredTokenIndexRef.current = index;
   }, []);
 
+  const handleUpdateProgress = useCallback((percent: number) => {
+    setProgressPercent((prev) => (Math.abs(prev - percent) >= 0.4 ? Math.round(percent * 10) / 10 : prev));
+  }, []);
+
   // Keyboard Shortcuts (NG 한 문장 되감기 및 제어)
   useEffect(() => {
     if (mode !== 'prompt') return;
@@ -452,7 +456,7 @@ export function App() {
             isPlaying={isPlaying}
             audioVolume={audioVolume}
             settings={settings}
-            onUpdateProgress={setProgressPercent}
+            onUpdateProgress={handleUpdateProgress}
             onSelectTokenIndex={handleSelectTokenIndex}
             onSyncGuideTokenIndex={handleSyncGuideTokenIndex}
             onHoverTokenIndex={handleHoverTokenIndex}

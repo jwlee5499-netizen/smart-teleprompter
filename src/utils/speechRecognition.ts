@@ -1,5 +1,10 @@
 import { WordToken, ScriptLine, ChapterMarker } from '../types';
 
+export const globalAudioState = {
+  volume: 0,
+  lastVoiceTime: 0,
+};
+
 interface IWindow extends Window {
   SpeechRecognition?: any;
   webkitSpeechRecognition?: any;
@@ -903,6 +908,9 @@ export class SpeechTracker {
           source.connect(analyser);
 
           const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          let lastReportTime = 0;
+          let lastReportedVol = 0;
+
           const checkVolume = () => {
             if (!this.analyser || !this.isListeningRequested) return;
 
@@ -913,8 +921,25 @@ export class SpeechTracker {
             }
             const average = sum / dataArray.length;
             const vol = Math.min(100, Math.round((average / 128) * 100));
+
+            const now = performance.now();
+            globalAudioState.volume = vol;
+            if (vol > 4) {
+              globalAudioState.lastVoiceTime = now;
+            }
+
+            // Throttle volume callbacks to ~12fps (80ms) unless volume drops to 0 or changes by >= 15%
+            // This prevents 60-144Hz React state re-rendering lag while keeping LED meters responsive
             if (this.onVolumeChangeCallback) {
-              this.onVolumeChangeCallback(vol);
+              if (
+                now - lastReportTime >= 80 ||
+                (vol === 0 && lastReportedVol !== 0) ||
+                Math.abs(vol - lastReportedVol) >= 15
+              ) {
+                lastReportTime = now;
+                lastReportedVol = vol;
+                this.onVolumeChangeCallback(vol);
+              }
             }
 
             this.animFrameId = requestAnimationFrame(checkVolume);
@@ -977,6 +1002,7 @@ export class SpeechTracker {
 
   public stop() {
     this.isListeningRequested = false;
+    globalAudioState.volume = 0;
 
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);
