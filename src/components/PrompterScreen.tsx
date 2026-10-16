@@ -219,7 +219,7 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       // [핵심 기능: 지금 말하는 스크립트가 끝나면 자연스럽게 다음 문장이 가이드라인에 오도록 전환]
       if (isAtSentenceEnd && nextSentenceY > currentRowY) {
         const confirmedY = nextSentenceY;
-        const safeCeilingY = nextSentenceY + lineHeightPx * 0.15;
+        const safeCeilingY = nextSentenceY + lineHeightPx * 0.25;
         return { confirmedY, safeCeilingY };
       }
 
@@ -227,15 +227,15 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
       const isAtRowEnd = clampedIdx === rowEndIdx - 1;
       if (isAtRowEnd && nextRowStartIdx !== -1 && nextRowY > currentRowY) {
         const confirmedY = nextRowY;
-        const safeCeilingY = nextRowY + lineHeightPx * 0.15;
+        const safeCeilingY = nextRowY + lineHeightPx * 0.25;
         return { confirmedY, safeCeilingY };
       }
 
       // 문장 및 줄 내부를 순차적으로 읽고 있는 동안:
-      // 시선이 흔들리지 않도록 현재 줄을 가이드라인 중앙에 안정적으로 유지
-      const progressFraction = Math.min(1, wordOrderInRow / Math.max(1, tokensInRow - 1));
-      const confirmedY = currentRowY + progressFraction * (rowDelta * 0.16);
-      const safeCeilingY = currentRowY + Math.min(rowDelta * 0.40, ((wordOrderInRow + 1.2) / tokensInRow) * rowDelta * 0.45);
+      // 시선이 흔들리지 않으면서도 화자의 음성에 맞춰 자연스럽게 스크롤되도록 연속 진행률 계산
+      const progressFraction = Math.min(1, (wordOrderInRow + 0.8) / tokensInRow);
+      const confirmedY = currentRowY + progressFraction * (rowDelta * 0.65);
+      const safeCeilingY = currentRowY + Math.max(rowDelta * 0.85, (progressFraction + 0.25) * rowDelta);
 
       return { confirmedY, safeCeilingY };
     },
@@ -414,11 +414,10 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 timeSinceVoice < 2400 || audioVolumeRef.current > 4;
 
               // 1단계: 가상 가이드 목표점(predictedTargetY)을 매 프레임 부드럽게 전진
-              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때는 초당 1.5배율로 잔잔하게 수렴
-              // - 중요: catchUp 중에는 속도(predictedSpeedRef)를 중복 가산하지 않아 급가속을 원천 방지합니다.
+              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때는 초당 2.5배율로 잔잔하게 수렴
               if (predictedTargetYRef.current < confirmedTargetYRef.current) {
                 const catchUpDiff = confirmedTargetYRef.current - predictedTargetYRef.current;
-                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * 1.5);
+                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * 2.5);
               } else if (isSpeakerActivelyReading) {
                 // 목표점에 도달한 뒤 화자가 말을 이어갈 때만 상한선까지 부드러운 감속 쿠션으로 전진
                 const ceilingHeadroom = Math.max(
@@ -429,7 +428,7 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
                 predictedTargetYRef.current = Math.min(
                   maxSafeCeilingYRef.current,
                   predictedTargetYRef.current +
-                    Math.min(lineHeightPx * 0.35, predictedSpeedRef.current) * (0.25 + 0.75 * runwayFactor) * dt
+                    Math.min(lineHeightPx * 0.38, predictedSpeedRef.current) * runwayFactor * dt
                 );
               }
 
@@ -438,55 +437,41 @@ export const PrompterScreen: React.FC<PrompterScreenProps> = ({
               const headroomToCeiling = Math.max(0, maxSafeCeilingYRef.current - scrollYRef.current);
 
               let desiredVelocity = 0;
-              if (headroomToCeiling > 0.2) {
+              if (headroomToCeiling > 0.05) {
                 // 상한선에 도달할 때의 부드러운 S자 감속 쿠션 (Soft S-Curve Cushion)
-                const softCushion = Math.min(1, headroomToCeiling / (lineHeightPx * 0.45));
+                const softCushion = Math.min(1, headroomToCeiling / (lineHeightPx * 0.35));
 
                 // 기본 순항 속도 (화자 평균 읽는 속도 기반)
                 const cruiseSpeed = isSpeakerActivelyReading
-                  ? Math.min(lineHeightPx * 0.35, predictedSpeedRef.current * 0.85) * softCushion
+                  ? Math.min(lineHeightPx * 0.36, predictedSpeedRef.current * 0.85) * softCushion
                   : 0;
 
                 // 목표 추종 속도: 간격(gap)이 벌어져도 절대로 급발진하지 않도록 차분한 비례 추종
-                const catchUpVelocity = Math.min(lineHeightPx * 0.42, gapToPredicted * 0.85);
+                const catchUpVelocity = Math.min(lineHeightPx * 0.50, gapToPredicted * 1.5) * softCushion;
 
-                // 최고 속도를 줄 높이의 0.45배 (~40px/s)로 완벽히 캡핑하여 눈이 핑 도는 과속 현상 100% 차단
-                const maxSafeVelocity = lineHeightPx * 0.45;
+                // 최고 속도를 줄 높이의 0.50배 (~45px/s)로 완벽히 캡핑하여 눈이 핑 도는 과속 현상 100% 차단
+                const maxSafeVelocity = lineHeightPx * 0.50;
 
-                // 속도들을 마구 더하지 않고, 안정적인 목표 속도로 조율
                 desiredVelocity = Math.min(
                   Math.max(cruiseSpeed, catchUpVelocity),
-                  headroomToCeiling * 1.3,
+                  headroomToCeiling * 2.0,
                   maxSafeVelocity
                 );
               }
 
-              // 3단계: 가속도/감속도 상한선 (Acceleration Limiter) 적용
-              // 속도가 갑자기 빨라지는 순간 충격(Jerk)을 완전히 없애기 위해 프레임당 가속 한도를 제한합니다.
-              const maxAccelPerFrame = (lineHeightPx * 0.35) * dt; // 초당 32px/s^2 이내로만 완만하게 가속
-              const maxDecelPerFrame = (lineHeightPx * 0.50) * dt; // 감속 시에도 부드럽게 감속
+              // 3단계: 유체 관성 필터 (First-Order Low-Pass Filter)
+              // 부드럽게 가속되고 부드럽게 감속되어 덜컹거림이나 정체 현상 원천 방지
+              const inertiaFactor = Math.min(1, dt * 3.5);
+              velocityRef.current = velocityRef.current + (desiredVelocity - velocityRef.current) * inertiaFactor;
 
-              let nextVelocity = velocityRef.current;
-              if (desiredVelocity > nextVelocity) {
-                nextVelocity = Math.min(desiredVelocity, nextVelocity + maxAccelPerFrame);
-              } else {
-                nextVelocity = Math.max(desiredVelocity, nextVelocity - maxDecelPerFrame);
-              }
-
-              // 4단계: 무거운 유체 관성 필터(Heavy Fluid Inertia, dt * 2.8)로 완벽한 미세 다림질
-              const inertiaBlend = Math.min(1, dt * 2.8);
-              velocityRef.current = Math.max(
-                0,
-                velocityRef.current + (nextVelocity - velocityRef.current) * inertiaBlend
-              );
-
-              if (velocityRef.current > 0.05 && headroomToCeiling > 0.05) {
+              // 4단계: 스크롤 적용 (천장 도달 시에만 정지)
+              if (headroomToCeiling > 0.05 && velocityRef.current > 0.005) {
                 const nextY = Math.min(
                   maxSafeCeilingYRef.current,
                   scrollYRef.current + velocityRef.current * dt
                 );
                 scrollYRef.current = Math.max(0, Math.min(maxScrollY, nextY));
-              } else {
+              } else if (headroomToCeiling <= 0.05) {
                 velocityRef.current = 0;
               }
             }
