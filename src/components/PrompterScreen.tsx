@@ -61,7 +61,7 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
   const isGlidingManualRef = useRef<boolean>(false);
 
   // Real-time Speaker Pace Prediction Refs (px/sec)
-  const predictedSpeedRef = useRef<number>(Math.max(38, lineHeightPx * 0.50));
+  const predictedSpeedRef = useRef<number>(Math.max(28, lineHeightPx * 0.40));
   const lastMatchTimeRef = useRef<number>(0);
   const lastActiveVoiceTimeRef = useRef<number>(0);
   const lastConfirmedYRef = useRef<number>(0);
@@ -225,7 +225,7 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
       // [핵심 기능: 지금 말하는 문장이 끝나면 지체 없이 다음 문장 첫 줄이 가이드라인에 오도록 전환]
       if (isAtSentenceEnd && nextSentenceY > currentRowY) {
         const confirmedY = nextSentenceY;
-        const safeCeilingY = nextSentenceY + lineHeightPx * 0.45;
+        const safeCeilingY = nextSentenceY + lineHeightPx * 1.25;
         return { confirmedY, safeCeilingY };
       }
 
@@ -233,7 +233,7 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
       const isAtRowEnd = clampedIdx >= rowEndIdx - 1;
       if (isAtRowEnd && nextRowStartIdx !== -1 && nextRowY > currentRowY) {
         const confirmedY = nextRowY;
-        const safeCeilingY = nextRowY + lineHeightPx * 0.45;
+        const safeCeilingY = nextRowY + lineHeightPx * 1.25;
         return { confirmedY, safeCeilingY };
       }
 
@@ -242,7 +242,7 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
       // 줄의 100%(effectiveDelta 전체)를 온전히 전진시켜 다음 줄이 늦게 올라오는 현상을 원천 해결합니다.
       const progressFraction = Math.min(1, (wordOrderInRow + 1.5) / Math.max(1, tokensInRow));
       const confirmedY = currentRowY + progressFraction * effectiveDelta;
-      const safeCeilingY = confirmedY + lineHeightPx * 0.45;
+      const safeCeilingY = confirmedY + lineHeightPx * 1.25;
 
       return { confirmedY, safeCeilingY };
     },
@@ -294,7 +294,7 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
       velocityRef.current = 0;
       lastConfirmedYRef.current = 0;
       lastMatchTimeRef.current = 0;
-      predictedSpeedRef.current = Math.max(38, lineHeightPx * 0.50);
+      predictedSpeedRef.current = Math.max(28, lineHeightPx * 0.40);
       isGlidingManualRef.current = false;
       if (contentTrackRef.current) {
         contentTrackRef.current.style.transform = `translate3d(0, 0px, 0)`;
@@ -330,14 +330,14 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
       const deltaY = bounds.confirmedY - lastConfirmedYRef.current;
       const dtSec = lastMatchTimeRef.current > 0 ? (now - lastMatchTimeRef.current) / 1000 : 0;
 
-      // 화자의 실제 읽는 속도(px/sec)를 반응성 높은 지수이동평균(EMA, 55:45)으로 실시간 추정
-      // 줄바꿈/문장 전환 시의 이동량도 함께 반영하여 화자가 빠르게 읽을 때 즉시 속도를 맞춰줍니다.
-      if (dtSec >= 0.08 && dtSec <= 3.5 && deltaY > 1) {
-        const clampedDelta = Math.min(deltaY, lineHeightPx * 1.4);
-        const minNaturalSpeed = lineHeightPx * 0.22;
-        const maxNaturalSpeed = lineHeightPx * 1.30;
+      // 화자의 실제 읽는 속도(px/sec)를 안정적인 저주파 지수이동평균(EMA, 85:15)으로 실시간 추정
+      // 순간적인 단어 인식 폭주나 일시정지에 의한 급가속/급감속을 원천 차단하고 차분한 순항 속도를 유지합니다.
+      if (dtSec >= 0.10 && dtSec <= 3.5 && deltaY > 1) {
+        const clampedDelta = Math.min(deltaY, lineHeightPx * 1.1);
+        const minNaturalSpeed = lineHeightPx * 0.28; // 최저 순항 하한 (~19px/s)
+        const maxNaturalSpeed = lineHeightPx * 0.65; // 최고 순항 상한 (~44px/s)
         const instantSpeed = Math.min(maxNaturalSpeed, Math.max(minNaturalSpeed, clampedDelta / dtSec));
-        predictedSpeedRef.current = predictedSpeedRef.current * 0.55 + instantSpeed * 0.45;
+        predictedSpeedRef.current = predictedSpeedRef.current * 0.85 + instantSpeed * 0.15;
       }
 
       confirmedTargetYRef.current = bounds.confirmedY;
@@ -409,9 +409,9 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
               Math.min(maxScrollY, scrollYRef.current + velocityRef.current * dt)
             );
           } else {
-            // [실시간 화자 속도 적응형 유체 스크롤 엔진]:
-            // 화자의 실제 발화 속도(느림/보통/빠름)에 맞춰 뒤처지지 않고 즉시 올라오면서도
-            // 프레임 간 관성 보간을 통해 끊김 없이 매끄럽게 주행합니다.
+            // [방송 스튜디오급 저크 프리(Jerk-Free) 유체 순항 스크롤 엔진]:
+            // 급가속/급제동을 원천 방지하는 물리 가속도 제한(Acceleration Limiting)과
+            // 화자 발화 속도 기반 안정 순항(Continuous Cruise)을 결합하여 속도 변화 없이 극도로 부드럽게 주행합니다.
             if (!hasSpokenStarted) {
               velocityRef.current = 0;
             } else {
@@ -420,76 +420,67 @@ const PrompterScreenComponent: React.FC<PrompterScreenProps> = ({
                 now - globalAudioState.lastVoiceTime
               );
               const isSpeakerActivelyReading =
-                timeSinceVoice < 2400 || audioVolumeRef.current > 4 || globalAudioState.volume > 4;
+                timeSinceVoice < 2200 || audioVolumeRef.current > 4 || globalAudioState.volume > 4;
 
-              // 1단계: 가상 가이드 목표점(predictedTargetY)을 매 프레임 전진
-              // - 음성인식 확인 위치(confirmedTargetY)가 앞서 나갔을 때는 초당 8.0배율로 빠르게 수렴
-              if (predictedTargetYRef.current < confirmedTargetYRef.current) {
-                const catchUpDiff = confirmedTargetYRef.current - predictedTargetYRef.current;
-                predictedTargetYRef.current += catchUpDiff * Math.min(1, dt * 8.0);
-              } else if (isSpeakerActivelyReading) {
-                // 확인된 위치에 도달한 뒤 화자가 말을 이어가는 동안 상한선까지 예측 속도로 자연스럽게 전진
-                const ceilingHeadroom = Math.max(
-                  0,
-                  maxSafeCeilingYRef.current - predictedTargetYRef.current
-                );
-                const runwayFactor = Math.min(1, ceilingHeadroom / (lineHeightPx * 0.35));
-                predictedTargetYRef.current = Math.min(
-                  maxSafeCeilingYRef.current,
-                  predictedTargetYRef.current +
-                    predictedSpeedRef.current * 0.90 * runwayFactor * dt
-                );
-              }
+              // 1. 기준 순항 속도 (Base Cruise Velocity)
+              // 화자가 읽는 동안에는 안정적으로 측정된 낭독 속도로 균일하게 유영하며,
+              // 발화가 완전히 멈췄을 때만 점진적으로 0으로 정지합니다.
+              const targetCruise = isSpeakerActivelyReading ? predictedSpeedRef.current : 0;
 
-              // 2단계: 실제 카메라 속도(desiredVelocity) 계산 — 화자의 낭독 속도에 맞춰 지체 없이 추종
-              const gapToConfirmed = Math.max(0, confirmedTargetYRef.current - scrollYRef.current);
-              const gapToTarget = Math.max(0, predictedTargetYRef.current - scrollYRef.current);
+              // 2. 현재 발화 위치 추종 및 여유 공간 계산
+              const gapToConfirmed = confirmedTargetYRef.current - scrollYRef.current;
               const headroomToCeiling = Math.max(0, maxSafeCeilingYRef.current - scrollYRef.current);
 
               let desiredVelocity = 0;
-              if (headroomToCeiling > 0.05) {
-                // 이미 확인된 발화 위치(confirmedTargetY)보다 뒤처져 있을 때는 감속 없이 전속력으로 따라잡고,
-                // 확인된 발화 위치를 통과해 상한선(safeCeilingY) 근처로 유영할 때만 소프트 쿠션 감속 적용
-                const softCushion =
-                  gapToConfirmed > 2
-                    ? 1.0
-                    : Math.min(1, headroomToCeiling / (lineHeightPx * 0.35));
 
-                // 화자의 실시간 발화 속도 기반 순항 속도
-                const cruiseSpeed = isSpeakerActivelyReading
-                  ? predictedSpeedRef.current * 0.95 * softCushion
-                  : 0;
+              if (isSpeakerActivelyReading && headroomToCeiling > 1.0) {
+                if (gapToConfirmed > 0) {
+                  // 스크롤이 현재 발화 위치보다 뒤처진 경우:
+                  // 속도를 급격히 튀기지 않고 아주 부드러운 미세 비례 추종(0.65배)만 더해 차분하게 좁힘
+                  const catchUpBoost = Math.min(lineHeightPx * 0.28, gapToConfirmed * 0.65);
+                  desiredVelocity = targetCruise + catchUpBoost;
+                } else {
+                  // 스크롤이 현재 발화 위치보다 살짝 앞선 경우:
+                  // 급브레이크를 밟지 않고 서서히 감속하되, 말하고 있는 동안에는 최소 미동 속도(0.12배)를 유지해 울컥거림 방지
+                  const easeTrim = Math.max(-targetCruise * 0.70, gapToConfirmed * 0.50);
+                  desiredVelocity = Math.max(lineHeightPx * 0.12, targetCruise + easeTrim);
+                }
 
-                // 목표 위치와의 거리(gapToTarget)에 비례하는 능동 추종 속도
-                const catchUpVelocity =
-                  (predictedSpeedRef.current * 0.75 + gapToTarget * 2.5) * softCushion;
+                // 상한선(천장)에 근접할 때는 완만한 감속 곡선 적용 (벽에 부딪히듯 멈추는 급제동 원천 차단)
+                if (headroomToCeiling < lineHeightPx * 0.85) {
+                  const ceilingFactor = Math.max(0, headroomToCeiling / (lineHeightPx * 0.85));
+                  desiredVelocity = desiredVelocity * ceilingFactor;
+                }
 
-                // 화자가 빠르게 읽거나 줄바꿈이 일어날 때도 뒤처지지 않도록 충분한 최고 속도 허용
-                const maxSafeVelocity =
-                  gapToConfirmed > lineHeightPx * 0.8
-                    ? lineHeightPx * 1.65
-                    : lineHeightPx * 1.25;
-
-                desiredVelocity = Math.min(
-                  Math.max(cruiseSpeed, catchUpVelocity),
-                  headroomToCeiling * 4.5,
-                  maxSafeVelocity
-                );
+                // 시선이 흔들리지 않도록 최대 속도 상한선 엄격 제한 (~46px/s)
+                const maxSafeVelocity = lineHeightPx * 0.70;
+                desiredVelocity = Math.min(maxSafeVelocity, desiredVelocity);
+              } else if (!isSpeakerActivelyReading) {
+                // 발화 정지 시 부드럽게 0으로 수렴
+                desiredVelocity = 0;
               }
 
-              // 3단계: 유체 관성 필터 (First-Order Low-Pass Filter)
-              // 반응성을 높이면서도(dt * 5.5) 프레임 간 속도 변화를 매끄럽게 이어줌
-              const inertiaFactor = Math.min(1, dt * 5.5);
-              velocityRef.current = velocityRef.current + (desiredVelocity - velocityRef.current) * inertiaFactor;
+              // 3. 물리적 가속도/감속도 상한선 (Jerk-Free Acceleration Limiter)
+              // 프레임당 속도 변화율(초당 가속/감속량)을 엄격히 제한하여 어떠한 상황에서도 급발진이나 급정거가 발생할 수 없습니다.
+              const maxAccel = lineHeightPx * 0.65; // 최대 가속도 (~44 px/s²)
+              const maxDecel = isSpeakerActivelyReading
+                ? lineHeightPx * 0.55 // 말하는 중에는 지극히 부드러운 감속 (~37 px/s²)
+                : lineHeightPx * 1.00; // 말을 멈췄을 때는 차분한 정지 감속 (~68 px/s²)
 
-              // 4단계: 스크롤 적용
-              if (headroomToCeiling > 0.05 && velocityRef.current > 0.005) {
+              if (desiredVelocity > velocityRef.current) {
+                velocityRef.current = Math.min(desiredVelocity, velocityRef.current + maxAccel * dt);
+              } else {
+                velocityRef.current = Math.max(desiredVelocity, velocityRef.current - maxDecel * dt);
+              }
+
+              // 4. 스크롤 위치 적용 (부드러운 GPU 서브픽셀 주행)
+              if (velocityRef.current > 0.05 && headroomToCeiling > 0.5) {
                 const nextY = Math.min(
                   maxSafeCeilingYRef.current,
                   scrollYRef.current + velocityRef.current * dt
                 );
                 scrollYRef.current = Math.max(0, Math.min(maxScrollY, nextY));
-              } else if (headroomToCeiling <= 0.05) {
+              } else if (headroomToCeiling <= 0.5 && !isSpeakerActivelyReading) {
                 velocityRef.current = 0;
               }
             }
